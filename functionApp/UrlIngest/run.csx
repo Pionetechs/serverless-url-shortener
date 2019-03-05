@@ -13,16 +13,16 @@ public static readonly int Base = Alphabet.Length;
 
 public static string Encode(int i)
 {
-            if (i == 0)
-                            return Alphabet[0].ToString();
-            var s = string.Empty;
-            while (i > 0)
-            {
-                            s += Alphabet[i % Base];
-                            i = i / Base;
-            }
+    if (i == 0)
+        return Alphabet[0].ToString();
+    var s = string.Empty;
+    while (i > 0)
+    {
+        s += Alphabet[i % Base];
+        i = i / Base;
+    }
 
-            return string.Join(string.Empty, s.Reverse());
+    return string.Join(string.Empty, s.Reverse());
 }
 
 public static string[] UTM_MEDIUMS=new [] {"twitter", "facebook", "linkedin", "googleplus"};
@@ -78,6 +78,7 @@ public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, NextId
     {
         foreach(var medium in UTM_MEDIUMS)
         {
+            log.Info("tagMediums true");
             var mediumUrl = $"{url}&utm_medium={medium}";
             var shortUrl = Encode(keyTable.Id++);
             log.Info($"Short URL for {mediumUrl} is {shortUrl}");
@@ -99,27 +100,66 @@ public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, NextId
     }
     else 
     {
-        var shortUrl = Encode(keyTable.Id++);
-        log.Info($"Short URL for {url} is {shortUrl}");
-        var newUrl = new ShortUrl 
-        {
-            PartitionKey = $"{shortUrl.First()}",
-            RowKey = $"{shortUrl}",
-            Url = url
-        };
-        var singleAdd = TableOperation.Insert(newUrl);
-        await tableOut.ExecuteAsync(singleAdd);
-        result.Add(new Result 
-        {
-            ShortUrl = $"{SHORTENER_URL}{newUrl.RowKey}",
-            LongUrl = WebUtility.UrlDecode(newUrl.Url)
-        }); 
+        log.Info("tagMediums false");
+        var newUrl = GenerateShortUrl(keyTable.Id++, url);
+
+        try{
+            // May fail if another function instance encoded the same keyTable.Id and tries to insert the same row
+            InsertUrlRow(newUrl, tableOut);
+
+            result.Add(new Result 
+            {
+                ShortUrl = $"{SHORTENER_URL}{newUrl.RowKey}",
+                LongUrl = WebUtility.UrlDecode(newUrl.Url)
+            }); 
+        }
+        catch (Exception e) {
+            log.Info($"got exception, falling back on GUID: {e}");
+
+            var fallbackUrl = GenerateFallbackUrl(url);
+            InsertUrlRow(fallbackUrl, tableOut);
+
+            result.Add(new Result 
+            {
+                ShortUrl = $"{SHORTENER_URL}{fallbackUrl.RowKey}",
+                LongUrl = WebUtility.UrlDecode(fallbackUrl.Url)
+            }); 
+        }
+
     }
 
     var operation = TableOperation.Replace(keyTable);
     await tableOut.ExecuteAsync(operation);
 
     log.Info($"Done.");
-    return req.CreateResponse(HttpStatusCode.OK, result);
-    
+    return req.CreateResponse(HttpStatusCode.OK, result);    
+}
+
+public static ShortUrl GenerateShortUrl (int i, string url) {
+    var shortUrl = Encode(i);
+    var newUrl = new ShortUrl 
+    {
+        PartitionKey = $"{shortUrl.First()}",
+        RowKey = $"{shortUrl}",
+        Url = url
+    };
+
+    return newUrl;
+}
+
+public static ShortUrl GenerateFallbackUrl (string url) {
+    var shortUrl = Guid.NewGuid().ToString();
+    var newUrl = new ShortUrl 
+    {
+        PartitionKey = $"{shortUrl.First()}",
+        RowKey = $"{shortUrl}",
+        Url = url
+    };
+
+    return newUrl;
+}
+
+public static async void InsertUrlRow(ShortUrl url, CloudTable tableOut) {
+    var singleAdd = TableOperation.Insert(url);
+    await tableOut.ExecuteAsync(singleAdd);
 }
