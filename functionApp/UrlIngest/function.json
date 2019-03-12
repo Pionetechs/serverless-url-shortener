@@ -1,14 +1,11 @@
 {
   "bindings": [
     {
-      "type": "table",
-      "name": "keyTable",
-      "tableName": "urls",
-      "partitionKey": "1",
-      "rowKey": "KEY",
-      "take": 1,
+      "name": "keyLease",
+      "type": "blob",
+      "path": "urls-lock/KEY.lck",
       "connection": "AzureWebJobsStorage",
-      "direction": "in"
+      "direction": "inout"
     },
     {
       "type": "table",

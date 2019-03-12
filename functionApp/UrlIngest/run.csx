@@ -1,10 +1,14 @@
 #load ".\models.csx"
 #r "Microsoft.WindowsAzure.Storage"
+
+using Microsoft.WindowsAzure.Storage.Blob;
+using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
 using System.Net;
 using System;
 using System.Linq;
 using System.Web;
+using System.Threading;
 
 public static readonly string SHORTENER_URL = System.Environment.GetEnvironmentVariable("SHORTENER_URL");
 public static readonly string UTM_SOURCE = System.Environment.GetEnvironmentVariable("UTM_SOURCE");
@@ -27,7 +31,7 @@ public static string Encode(int i)
 
 public static string[] UTM_MEDIUMS=new [] {"twitter", "facebook", "linkedin", "googleplus"};
 
-public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, NextId keyTable, CloudTable tableOut, TraceWriter log)
+public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, CloudBlockBlob keyLease, CloudTable tableOut, TraceWriter log)
 {
     log.Info($"C# manually triggered function called with req: {req}");
 
@@ -54,56 +58,73 @@ public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, NextId
     {
         throw new Exception("Need a URL to shorten!");
     }
-
-    if (keyTable == null)
-    {
-        keyTable = new NextId
-        {
-            PartitionKey = "1",
-            RowKey = "KEY",
-            Id = 1024
-        };
-        var keyAdd = TableOperation.Insert(keyTable);
-        await tableOut.ExecuteAsync(keyAdd); 
-    }
     
-    log.Info($"Current key: {keyTable.Id}"); 
+    // Try to acquire lock
+    string leaseId = "";
     
-    if (tagSource) 
-    {
-        url = $"{url}?utm_source={UTM_SOURCE}";
-    }
-
-    if (tagMediums) 
-    {
-        foreach(var medium in UTM_MEDIUMS)
-        {
-            log.Info("tagMediums true");
-            var mediumUrl = $"{url}&utm_medium={medium}";
-            var shortUrl = Encode(keyTable.Id++);
-            log.Info($"Short URL for {mediumUrl} is {shortUrl}");
-            var newUrl = new ShortUrl 
-            {
-                PartitionKey = $"{shortUrl.First()}",
-                RowKey = $"{shortUrl}",
-                Medium = medium,
-                Url = mediumUrl
-            };
-            var multiAdd = TableOperation.Insert(newUrl);
-            await tableOut.ExecuteAsync(multiAdd); 
-            result.Add(new Result 
-            { 
-                ShortUrl = $"{SHORTENER_URL}{newUrl.RowKey}",
-                LongUrl = WebUtility.UrlDecode(newUrl.Url)
-            });
+    for (var i = 0; i < 10; i++){
+        try{
+            leaseId = keyLease.AcquireLease(TimeSpan.FromSeconds(15), Guid.NewGuid().ToString());
+            break;
+        }
+        catch {
+            Thread.Sleep(2000); // try again in 2 seconds
         }
     }
-    else 
-    {
-        log.Info("tagMediums false");
-        var newUrl = GenerateShortUrl(keyTable.Id++, url);
+    
+    try {    
+        var retrieve = TableOperation.Retrieve<NextId>("1", "KEY");
+        NextId keyTable = (NextId) tableOut.Execute(retrieve).Result;
+        keyTable.ETag = "*";
 
-        try{
+        if (keyTable == null)
+        {
+            keyTable = new NextId
+            {
+                PartitionKey = "1",
+                RowKey = "KEY",
+                Id = 1024
+            };
+            var keyAdd = TableOperation.Insert(keyTable);
+            await tableOut.ExecuteAsync(keyAdd); 
+        }
+        
+        log.Info($"Current key: {keyTable.Id}"); 
+        
+        if (tagSource) 
+        {
+            url = $"{url}?utm_source={UTM_SOURCE}";
+        }
+
+        if (tagMediums) 
+        {
+            foreach(var medium in UTM_MEDIUMS)
+            {
+                log.Info("tagMediums true");
+                var mediumUrl = $"{url}&utm_medium={medium}";
+                var shortUrl = Encode(keyTable.Id++);
+                log.Info($"Short URL for {mediumUrl} is {shortUrl}");
+                var newUrl = new ShortUrl 
+                {
+                    PartitionKey = $"{shortUrl.First()}",
+                    RowKey = $"{shortUrl}",
+                    Medium = medium,
+                    Url = mediumUrl
+                };
+                var multiAdd = TableOperation.Insert(newUrl);
+                await tableOut.ExecuteAsync(multiAdd); 
+                result.Add(new Result 
+                { 
+                    ShortUrl = $"{SHORTENER_URL}{newUrl.RowKey}",
+                    LongUrl = WebUtility.UrlDecode(newUrl.Url)
+                });
+            }
+        }
+        else 
+        {
+            log.Info("tagMediums false");
+
+            var newUrl = GenerateShortUrl(keyTable.Id++, url);
             // May fail if another function instance encoded the same keyTable.Id and tries to insert the same row
             InsertUrlRow(newUrl, tableOut);
 
@@ -113,26 +134,17 @@ public static async Task<HttpResponseMessage> Run(HttpRequestMessage req, NextId
                 LongUrl = WebUtility.UrlDecode(newUrl.Url)
             }); 
         }
-        catch (Exception e) {
-            log.Info($"got exception, falling back on GUID: {e}");
 
-            var fallbackUrl = GenerateFallbackUrl(url);
-            InsertUrlRow(fallbackUrl, tableOut);
+        var operation = TableOperation.Replace(keyTable);
+        await tableOut.ExecuteAsync(operation);
 
-            result.Add(new Result 
-            {
-                ShortUrl = $"{SHORTENER_URL}{fallbackUrl.RowKey}",
-                LongUrl = WebUtility.UrlDecode(fallbackUrl.Url)
-            }); 
-        }
-
+        log.Info($"Done.");
+        return req.CreateResponse(HttpStatusCode.OK, result);  
     }
-
-    var operation = TableOperation.Replace(keyTable);
-    await tableOut.ExecuteAsync(operation);
-
-    log.Info($"Done.");
-    return req.CreateResponse(HttpStatusCode.OK, result);    
+    finally {
+        keyLease.ReleaseLease(AccessCondition.GenerateLeaseCondition(leaseId));
+    }
+    
 }
 
 public static ShortUrl GenerateShortUrl (int i, string url) {
