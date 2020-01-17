@@ -6,6 +6,12 @@
         "route": "/{shortUrl}"
       },
       "backendUri": "http://%WEBSITE_HOSTNAME%/api/UrlRedirect/{shortUrl}"
+    },
+    "LetsEncryptProxy": {
+      "matchCondition": {
+        "route": "/.well-known/acme-challenge/{code}"
+      },
+      "backendUri": "http://%WEBSITE_HOSTNAME%/api/letsencrypt/.well-known/acme-challenge/{code}"
     }
   }
 }
